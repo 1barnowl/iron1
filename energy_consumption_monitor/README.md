@@ -2,11 +2,8 @@
 
 A Dockerized energy telemetry platform that ingests MQTT sensor readings, stores time-series data in TimescaleDB, exposes a FastAPI backend for analytics, and surfaces live consumption in a Streamlit dashboard — all in a local, container-friendly Python stack.
 
-```
 
-```
 
----
 
 ## Features
 
