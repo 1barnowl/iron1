@@ -6,9 +6,7 @@ Iron1 functions as a distributed, safety‑critical orchestration fabric that un
 
 ## Constituent Subsystems
 
-- Automated Supply Chain Optimizer (ASCO)
-- Automated Standard Trading Bot
-- Automated Crypto Trading Bot
+- Bot Birds Eye View
 - Industrial IoT Harmonizer
 - Dynamic Inventory Balancer
 - Automated Maintenance Predictor
