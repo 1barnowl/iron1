@@ -1,0 +1,130 @@
+#!/bin/bash
+
+# Energy Monitor - First-Time Setup Script
+# This script initializes the system with secure passwords and MQTT authentication
+
+set -e
+
+echo "==========================================="
+echo "Energy Monitor - First-Time Setup"
+echo "==========================================="
+echo ""
+
+# Check for required commands
+for cmd in openssl docker docker-compose; do
+    if ! command -v $cmd &> /dev/null; then
+        echo "❌ Error: $cmd is not installed"
+        exit 1
+    fi
+done
+
+echo "✅ All required commands found"
+echo ""
+
+# Check if .env already exists
+if [ -f .env ]; then
+    read -p "⚠️  .env file already exists. Overwrite? (y/N): " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        echo "Setup cancelled"
+        exit 0
+    fi
+    mv .env .env.backup
+    echo "Backed up existing .env to .env.backup"
+fi
+
+# Generate secure passwords
+echo "🔐 Generating secure passwords..."
+DB_PASSWORD=$(openssl rand -base64 24)
+MQTT_PASSWORD=$(openssl rand -base64 24)
+JWT_SECRET=$(openssl rand -hex 32)
+GRAFANA_PASSWORD=$(openssl rand -base64 16)
+
+echo "✅ Passwords generated"
+echo ""
+
+# Create .env file
+cat > .env << EOF
+# Energy Monitor Environment Configuration
+# Generated on $(date)
+# DO NOT COMMIT THIS FILE TO VERSION CONTROL
+
+# Database Configuration
+DB_PASSWORD=${DB_PASSWORD}
+
+# MQTT Broker Authentication
+MQTT_USER=energy_mqtt
+MQTT_PASSWORD=${MQTT_PASSWORD}
+
+# JWT Secret for API Authentication
+JWT_SECRET=${JWT_SECRET}
+
+# API Authentication (set to 'true' to require JWT tokens)
+AUTH_ENABLED=false
+
+# Grafana Admin Password
+GRAFANA_PASSWORD=${GRAFANA_PASSWORD}
+
+# CORS Origins (comma-separated, use * for development)
+ALLOWED_ORIGINS=*
+
+# Logging Level
+LOG_LEVEL=INFO
+EOF
+
+echo "✅ Created .env file with secure passwords"
+echo ""
+
+# Create mosquitto auth directory
+mkdir -p mosquitto/auth
+
+# Generate MQTT password file
+echo "🔐 Creating MQTT password file..."
+docker run --rm -v $(pwd)/mosquitto/auth:/mosquitto/auth eclipse-mosquitto:latest \
+    mosquitto_passwd -c -b /mosquitto/auth/passwd energy_mqtt "${MQTT_PASSWORD}"
+
+echo "✅ MQTT password file created"
+echo ""
+
+# Create directories for data persistence
+echo "📁 Creating data directories..."
+mkdir -p mosquitto/data mosquitto/log
+mkdir -p backend/models
+mkdir -p grafana/dashboards
+
+echo "✅ Directories created"
+echo ""
+
+# Set permissions
+echo "🔒 Setting permissions..."
+chmod 600 .env
+chmod 644 mosquitto/auth/passwd
+
+echo "✅ Permissions set"
+echo ""
+
+echo "==========================================="
+echo "Setup Complete!"
+echo "==========================================="
+echo ""
+echo "Generated credentials (SAVE THESE SECURELY):"
+echo ""
+echo "Database Password:  ${DB_PASSWORD}"
+echo "MQTT Password:      ${MQTT_PASSWORD}"
+echo "JWT Secret:         ${JWT_SECRET}"
+echo "Grafana Password:   ${GRAFANA_PASSWORD}"
+echo ""
+echo "MQTT Username:      energy_mqtt"
+echo ""
+echo "⚠️  IMPORTANT:"
+echo "1. These credentials are stored in .env"
+echo "2. The .env file is in .gitignore (do not commit it)"
+echo "3. Save these credentials in a secure password manager"
+echo "4. To enable API authentication, set AUTH_ENABLED=true in .env"
+echo ""
+echo "Next steps:"
+echo "1. Review and customize .env if needed"
+echo "2. Run: ./start.sh"
+echo "3. Access dashboard at http://localhost:8501"
+echo "4. Access Grafana at http://localhost:3000 (admin/${GRAFANA_PASSWORD})"
+echo ""

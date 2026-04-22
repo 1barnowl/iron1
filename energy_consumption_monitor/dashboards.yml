@@ -1,0 +1,331 @@
+#!/usr/bin/env python3
+"""
+Modbus Industrial Meter Integration
+Supports common industrial energy meters via Modbus TCP/RTU
+
+Compatible meters:
+- Carlo Gavazzi EM340
+- Schneider PM5560
+- ABB M2M
+- Phoenix Contact EEM-MA
+"""
+
+from pymodbus.client import ModbusTcpClient, ModbusSerialClient
+from pymodbus.constants import Endian
+from pymodbus.payload import BinaryPayloadDecoder
+import paho.mqtt.client as mqtt
+import json
+import time
+import os
+from datetime import datetime
+
+class ModbusIntegration:
+    def __init__(self, mqtt_broker="localhost", mqtt_port=1883):
+        # MQTT Configuration
+        self.mqtt_broker = mqtt_broker
+        self.mqtt_port = mqtt_port
+        self.mqtt_user = os.getenv("MQTT_USER", "energy_mqtt")
+        self.mqtt_password = os.getenv("MQTT_PASSWORD")
+        
+        # Initialize MQTT client
+        self.mqtt_client = mqtt.Client()
+        if self.mqtt_user and self.mqtt_password:
+            self.mqtt_client.username_pw_set(self.mqtt_user, self.mqtt_password)
+        
+        self.mqtt_client.connect(self.mqtt_broker, self.mqtt_port, 60)
+        self.mqtt_client.loop_start()
+        
+        print(f"Connected to MQTT broker")
+    
+    def read_carlo_gavazzi_em340(self, client, unit_id=1):
+        """
+        Read from Carlo Gavazzi EM340 meter
+        Register map documented in EM340 manual
+        """
+        try:
+            # Read voltage, current, power registers
+            # EM340 uses 2-register (32-bit) floats
+            result = client.read_holding_registers(0x0000, 52, unit=unit_id)
+            
+            if result.isError():
+                print(f"Modbus error: {result}")
+                return None
+            
+            registers = result.registers
+            
+            # Decode register pairs as floats
+            def decode_float(reg_pair):
+                decoder = BinaryPayloadDecoder.fromRegisters(
+                    reg_pair,
+                    byteorder=Endian.Big,
+                    wordorder=Endian.Big
+                )
+                return decoder.decode_32bit_float()
+            
+            # Extract values (register addresses from EM340 manual)
+            voltage_l1 = decode_float(registers[0:2])     # V L1-N
+            voltage_l2 = decode_float(registers[2:4])     # V L2-N
+            voltage_l3 = decode_float(registers[4:4])     # V L3-N
+            
+            current_l1 = decode_float(registers[12:14])   # A L1
+            current_l2 = decode_float(registers[14:16])   # A L2
+            current_l3 = decode_float(registers[16:18])   # A L3
+            
+            power_total = decode_float(registers[40:42])  # Total active power (W)
+            pf_total = decode_float(registers[48:50])     # Total power factor
+            
+            return {
+                "voltage": voltage_l1,  # Use L1 as representative
+                "current": current_l1,
+                "power_watts": power_total,
+                "power_factor": pf_total,
+                "metadata": {
+                    "voltage_l1": voltage_l1,
+                    "voltage_l2": voltage_l2,
+                    "voltage_l3": voltage_l3,
+                    "current_l1": current_l1,
+                    "current_l2": current_l2,
+                    "current_l3": current_l3,
+                    "three_phase": True
+                }
+            }
+        
+        except Exception as e:
+            print(f"Error reading EM340: {e}")
+            return None
+    
+    def read_schneider_pm5560(self, client, unit_id=1):
+        """
+        Read from Schneider PM5560 meter
+        Uses standard Modbus register map
+        """
+        try:
+            # PM5560 voltage in registers 2999-3004
+            voltage_result = client.read_holding_registers(2999, 6, unit=unit_id)
+            # PM5560 current in registers 3019-3024
+            current_result = client.read_holding_registers(3019, 6, unit=unit_id)
+            # PM5560 power in registers 3053-3068
+            power_result = client.read_holding_registers(3053, 16, unit=unit_id)
+            
+            if any(r.isError() for r in [voltage_result, current_result, power_result]):
+                return None
+            
+            # Decode (PM5560 uses 2-register floats)
+            def decode_pm_float(registers):
+                decoder = BinaryPayloadDecoder.fromRegisters(
+                    registers,
+                    byteorder=Endian.Big,
+                    wordorder=Endian.Big
+                )
+                return decoder.decode_32bit_float()
+            
+            voltage_l1 = decode_pm_float(voltage_result.registers[0:2])
+            current_l1 = decode_pm_float(current_result.registers[0:2])
+            power_total = decode_pm_float(power_result.registers[0:2])
+            pf = decode_pm_float(power_result.registers[14:16])
+            
+            return {
+                "voltage": voltage_l1,
+                "current": current_l1,
+                "power_watts": power_total,
+                "power_factor": pf
+            }
+        
+        except Exception as e:
+            print(f"Error reading PM5560: {e}")
+            return None
+    
+    def read_generic_meter(self, client, config, unit_id=1):
+        """
+        Read from generic Modbus meter using custom register map
+        
+        config = {
+            "voltage_reg": 0,
+            "current_reg": 6,
+            "power_reg": 12,
+            "pf_reg": 18,
+            "format": "float32"  # or "int16", "int32"
+        }
+        """
+        try:
+            data = {}
+            
+            for field, reg in [
+                ("voltage", config.get("voltage_reg")),
+                ("current", config.get("current_reg")),
+                ("power_watts", config.get("power_reg")),
+                ("power_factor", config.get("pf_reg"))
+            ]:
+                if reg is None:
+                    continue
+                
+                result = client.read_holding_registers(reg, 2, unit=unit_id)
+                if result.isError():
+                    continue
+                
+                # Decode based on format
+                if config.get("format") == "float32":
+                    decoder = BinaryPayloadDecoder.fromRegisters(
+                        result.registers,
+                        byteorder=Endian.Big,
+                        wordorder=Endian.Big
+                    )
+                    value = decoder.decode_32bit_float()
+                elif config.get("format") == "int32":
+                    value = (result.registers[0] << 16) | result.registers[1]
+                else:  # int16
+                    value = result.registers[0]
+                
+                data[field] = value
+            
+            return data if data else None
+        
+        except Exception as e:
+            print(f"Error reading generic meter: {e}")
+            return None
+    
+    def monitor_tcp_meter(self, ip, port, meter_type, device_id, unit_id=1, interval=10):
+        """Monitor a single TCP Modbus meter"""
+        print(f"\nConnecting to {meter_type} at {ip}:{port}")
+        client = ModbusTcpClient(ip, port=port)
+        
+        if not client.connect():
+            print(f"Failed to connect to {ip}:{port}")
+            return
+        
+        print(f"Connected! Monitoring {device_id}")
+        print(f"Polling every {interval} seconds\n")
+        
+        try:
+            while True:
+                # Read based on meter type
+                if meter_type == "em340":
+                    data = self.read_carlo_gavazzi_em340(client, unit_id)
+                elif meter_type == "pm5560":
+                    data = self.read_schneider_pm5560(client, unit_id)
+                else:
+                    print("Unknown meter type")
+                    break
+                
+                if data:
+                    # Build MQTT payload
+                    payload = {
+                        "device_id": device_id,
+                        "location": f"Modbus {meter_type.upper()}",
+                        "power_watts": data['power_watts'],
+                        "voltage": data['voltage'],
+                        "current": data['current'],
+                        "power_factor": data.get('power_factor', 1.0),
+                        "timestamp": datetime.utcnow().isoformat() + "Z",
+                        "metadata": data.get('metadata', {})
+                    }
+                    
+                    # Publish
+                    topic = f"energy/sensors/{device_id}"
+                    self.mqtt_client.publish(topic, json.dumps(payload))
+                    
+                    print(f"✓ {device_id}: {data['power_watts']:.2f}W | "
+                          f"{data['voltage']:.2f}V | {data['current']:.2f}A")
+                
+                time.sleep(interval)
+        
+        except KeyboardInterrupt:
+            print("\nStopping...")
+        finally:
+            client.close()
+            self.mqtt_client.loop_stop()
+            self.mqtt_client.disconnect()
+    
+    def monitor_serial_meter(self, port, baudrate, meter_type, device_id, unit_id=1, interval=10):
+        """Monitor a single RTU Modbus meter (RS485)"""
+        print(f"\nConnecting to {meter_type} at {port} ({baudrate} baud)")
+        
+        client = ModbusSerialClient(
+            method='rtu',
+            port=port,
+            baudrate=baudrate,
+            timeout=1,
+            parity='N',
+            stopbits=1,
+            bytesize=8
+        )
+        
+        if not client.connect():
+            print(f"Failed to open serial port {port}")
+            return
+        
+        print(f"Connected! Monitoring {device_id}")
+        print(f"Polling every {interval} seconds\n")
+        
+        try:
+            while True:
+                if meter_type == "em340":
+                    data = self.read_carlo_gavazzi_em340(client, unit_id)
+                elif meter_type == "pm5560":
+                    data = self.read_schneider_pm5560(client, unit_id)
+                
+                if data:
+                    payload = {
+                        "device_id": device_id,
+                        "location": f"Modbus RTU {meter_type.upper()}",
+                        "power_watts": data['power_watts'],
+                        "voltage": data['voltage'],
+                        "current": data['current'],
+                        "power_factor": data.get('power_factor', 1.0),
+                        "timestamp": datetime.utcnow().isoformat() + "Z"
+                    }
+                    
+                    topic = f"energy/sensors/{device_id}"
+                    self.mqtt_client.publish(topic, json.dumps(payload))
+                    
+                    print(f"✓ {device_id}: {data['power_watts']:.2f}W")
+                
+                time.sleep(interval)
+        
+        except KeyboardInterrupt:
+            print("\nStopping...")
+        finally:
+            client.close()
+            self.mqtt_client.loop_stop()
+            self.mqtt_client.disconnect()
+
+
+if __name__ == "__main__":
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Modbus Meter Integration")
+    parser.add_argument("--type", required=True, choices=["em340", "pm5560"], 
+                       help="Meter type")
+    parser.add_argument("--mode", required=True, choices=["tcp", "rtu"],
+                       help="Modbus mode")
+    parser.add_argument("--device-id", required=True, help="Device ID for MQTT")
+    parser.add_argument("--unit-id", type=int, default=1, help="Modbus unit ID")
+    parser.add_argument("--interval", type=int, default=10, help="Polling interval (seconds)")
+    
+    # TCP specific
+    parser.add_argument("--ip", help="IP address (for TCP mode)")
+    parser.add_argument("--port", type=int, default=502, help="TCP port")
+    
+    # RTU specific
+    parser.add_argument("--serial-port", help="Serial port (for RTU mode, e.g., /dev/ttyUSB0)")
+    parser.add_argument("--baudrate", type=int, default=9600, help="Serial baudrate")
+    
+    args = parser.parse_args()
+    
+    integration = ModbusIntegration()
+    
+    if args.mode == "tcp":
+        if not args.ip:
+            parser.error("--ip required for TCP mode")
+        integration.monitor_tcp_meter(
+            args.ip, args.port, args.type, args.device_id, 
+            args.unit_id, args.interval
+        )
+    
+    elif args.mode == "rtu":
+        if not args.serial_port:
+            parser.error("--serial-port required for RTU mode")
+        integration.monitor_serial_meter(
+            args.serial_port, args.baudrate, args.type, args.device_id,
+            args.unit_id, args.interval
+        )

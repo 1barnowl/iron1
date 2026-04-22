@@ -1,0 +1,14 @@
+# Requirements for Energy Monitor Integration Examples
+# Install with: pip3 install -r requirements.txt
+
+# MQTT client
+paho-mqtt==1.6.1
+
+# HTTP requests (for Shelly)
+requests==2.31.0
+
+# Modbus protocol (for industrial meters)
+pymodbus==3.5.4
+
+# Serial communication
+pyserial==3.5
