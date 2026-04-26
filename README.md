@@ -7,9 +7,6 @@ Iron1 functions as a distributed, safety‑critical orchestration fabric that un
 ## Constituent Subsystems
 
 - Bots Controller
-- Industrial IoT Harmonizer
-- Dynamic Inventory Balancer
-- Automated Maintenance Predictor
 - Energy Consumption Monitor
 
 ## Comprehensive Capabilities
